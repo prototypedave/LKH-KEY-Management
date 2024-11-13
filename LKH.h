@@ -6,27 +6,27 @@
 #include <queue>
 #include <algorithm>
 #include <omnetpp.h>
+#include "Node.h"
+
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+
+#include <chrono>
+#include <fstream>
 
 using namespace std;
 using namespace omnetpp;
 
 namespace inet {
 
-/**
- * @desc: Class to define the direction of the members in a binary tree
- * key -> id of the member in the tree
- * pointers: direction of the member in the tree
- */
-class Node {
-public:
-    string key;
-    Node* left;
-    Node* right;
-    Node* parent;
+struct PathData {
+    L3Address localAddr;
+    std::string sessionKey;
 
-    // Constructor to initialize the node
-    Node(string key) : key(key), left(nullptr), right(nullptr), parent(nullptr) {}
+    PathData(const L3Address& addr, const std::string& key)
+         : localAddr(addr), sessionKey(key) {}
 };
+
 
 /**
  * @desc: Tree class to manage the binary tree structure
@@ -34,12 +34,12 @@ public:
 class Tree {
 private:
     // Root node of the tree
-    Node* Root;
+    LKHNode* Root;
 
     /**
      * @brief: gets the number of nodes in a given branch
      */
-    int countNodes(Node* node) {
+    int countNodes(LKHNode* node) {
         if (node == nullptr) return 0;
         return 1 + countNodes(node->left) + countNodes(node->right);
     }
@@ -47,14 +47,14 @@ private:
     /**
      * @brief: adds a subtree to a branch or node
     */
-    void attachSubtree(Node* parent, Node* subtree) {
+    void attachSubtree(LKHNode* parent, LKHNode* subtree) {
         if (subtree == nullptr) return;
 
-        queue<Node*> q;
+        queue<LKHNode*> q;
         q.push(parent);
 
         while (!q.empty()) {
-            Node* current = q.front();
+            LKHNode* current = q.front();
             q.pop();
 
             if (current->left == nullptr) {
@@ -72,75 +72,52 @@ private:
         }
     }
 
-
-public:
-    // Constructor to initialize the root of the tree
-    Tree(string key) {
-        Root = new Node(key);
+    string generateKey() {
+        unsigned char key[16];
+        RAND_bytes(key, sizeof(key));
+        return string(reinterpret_cast<char*>(key), sizeof(key));
     }
 
-    // Getter for the root node
-    Node* getRoot() const {
-        return Root;
-    }
-
-    /**
-     * @brief: Adds a node to either the left or right side of the parent
-     * @param parent: The parent node where the new node will be added
-     * @param key: String value representing the id of the new node
-     * @return The newly added node, or nullptr if the parent already has both children
-     */
-    Node* addNode(Node* parent, Node* newNode) {
-        if (parent == nullptr) {
-            EV_ERROR << "Parent node is null!" << endl;
-            return nullptr;
-        }
-
-        newNode->parent = parent;
-
-        if (parent->left == nullptr) {
-            parent->left = newNode;
-            EV_INFO << newNode->key << " added on the left side of " << parent->key << endl;
-            return newNode;
-        } else if (parent->right == nullptr) {
-            parent->right = newNode;
-            EV_INFO << newNode->key << " added on the right side of " << parent->key << endl;
-            return newNode;
-        } else {
-            EV_INFO << parent->key << " already has both left and right children." << endl;
-            return nullptr;
-        }
+    void updateKeys(LKHNode* node) {
+        if (node == nullptr) return;
+        node->sessionKey = generateKey();
+        if (node->parent != nullptr) {
+            updateKeys(node->parent);
+       }
     }
 
     /**
-     * @brief: Finds the first node with an empty left or right child
-     * @return The first node with an empty child, or nullptr if all nodes are full
-     */
-    Node* getBranch() {
-        if (Root == nullptr) return nullptr;
+      * @brief: Adds a node to either the left or right side of the parent
+      * @param parent: The parent node where the new node will be added
+      * @param key: String value representing the id of the new node
+      * @return The newly added node, or nullptr if the parent already has both children
+    */
+    LKHNode* addNode(LKHNode* parent, LKHNode* newNode) {
+       if (parent == nullptr) {
+           EV_ERROR << "Parent node is null!" << endl;
+           return nullptr;
+       }
 
-        queue<Node*> q;
-        q.push(Root);
+       newNode->parent = parent;
 
-        while (!q.empty()) {
-            Node* current = q.front();
-            q.pop();
-
-            if (current->left == nullptr || current->right == nullptr) {
-                return current;
-            }
-
-            if (current->left != nullptr) q.push(current->left);
-            if (current->right != nullptr) q.push(current->right);
-        }
-
-        return nullptr;
-    }
+       if (parent->left == nullptr) {
+           parent->left = newNode;
+           EV_INFO << newNode->key << " added on the left side of " << parent->key << endl;
+           return newNode;
+       } else if (parent->right == nullptr) {
+       parent->right = newNode;
+           EV_INFO << newNode->key << " added on the right side of " << parent->key << endl;
+           return newNode;
+       } else {
+       EV_INFO << parent->key << " already has both left and right children." << endl;
+           return nullptr;
+       }
+   }
 
     /**
      * @brief: removes the given node from the tree and updates the tree
-     */
-    void removeNode(Node* node) {
+    */
+    void removeNode(LKHNode* node) {
         if (node == nullptr) {
             EV_ERROR << "Node is null. Cannot restructure." << std::endl;
             return;
@@ -160,7 +137,7 @@ public:
             return;
         }
 
-        Node* replacement = (countNodes(node->left) <= countNodes(node->right)) ? node->left : node->right;
+        LKHNode* replacement = (countNodes(node->left) <= countNodes(node->right)) ? node->left : node->right;
             if (replacement != nullptr) {
                 replacement->parent = node->parent;
             }
@@ -182,19 +159,105 @@ public:
             }
 
             delete node;
+     }
+
+
+public:
+    // Constructor to initialize the root of the tree
+    Tree(LKHNode* rootNode) {
+        Root = rootNode;
+    }
+
+    // Getter for the root node
+    LKHNode* getRoot() const {
+        return Root;
+    }
+
+    std::vector<PathData> AddNode(LKHNode* parent, LKHNode* newNode, int nodes) {
+        auto start = chrono::high_resolution_clock::now();
+
+        LKHNode* addedNode = addNode(parent, newNode);
+        std::vector<PathData> subtree;
+        if (addedNode != nullptr) {
+            updateKeys(addedNode);
+        }
+
+        auto end = chrono::high_resolution_clock::now();
+        chrono::duration<double> duration = end - start;
+
+        std::ofstream file;
+        file.open("results/computation.csv", std::ios::app);
+        if (file.is_open()) {
+            file << duration.count() << "," << nodes << "\n";
+            file.close();
+        }
+
+        if (addedNode != nullptr) {
+            subtree = distributeKeys(addedNode);
+        }
+        return subtree;
+    }
+
+    std::vector<PathData> RemoveNode(LKHNode * node) {
+        std::vector<PathData> subtree;
+        if (node->parent != nullptr) {
+            updateKeys(node->parent);
+            subtree = distributeKeys(node->parent);
+        }
+        return subtree;
+    }
+
+    /**
+     * @brief: return a list of addresses and the keys of the affected nodes
+     */
+    std::vector<PathData> distributeKeys(LKHNode* node) {
+        std::vector<PathData> path;
+        LKHNode* current = node;
+        while (current != nullptr) {
+            path.emplace_back(current->localAddr, current->sessionKey);
+            current = current->parent;
+        }
+
+        reverse(path.begin(), path.end());
+        return path;
+    }
+
+    /**
+     * @brief: Finds the first node with an empty left or right child
+     * @return The first node with an empty child, or nullptr if all nodes are full
+     */
+    LKHNode* getBranch() {
+        if (Root == nullptr) return nullptr;
+
+        queue<LKHNode*> q;
+        q.push(Root);
+
+        while (!q.empty()) {
+            LKHNode* current = q.front();
+            q.pop();
+
+            if (current->left == nullptr || current->right == nullptr) {
+                return current;
+            }
+
+            if (current->left != nullptr) q.push(current->left);
+            if (current->right != nullptr) q.push(current->right);
+        }
+
+        return nullptr;
     }
 
     /**
      * @brief: returns the node if found in the tree
      */
-    Node* getNode(const string& key) {
+    LKHNode* getNode(const string& key) {
         if (Root == nullptr) return nullptr;
 
-        queue<Node*> q;
+        queue<LKHNode*> q;
         q.push(Root);
 
         while (!q.empty()) {
-            Node* current = q.front();
+            LKHNode* current = q.front();
             q.pop();
 
             if (current->key == key) {
@@ -213,7 +276,7 @@ public:
      * @param node: The current node to display
      * @param depth: The depth level (for indentation)
      */
-    void displayTree(Node* node, string prefix = "", bool isLeft = true) {
+    void displayTree(LKHNode* node, string prefix = "", bool isLeft = true) {
         if (node == nullptr) return;
 
         // Print the current node with its prefix
@@ -236,12 +299,12 @@ public:
     }
 
     /**
-     * @brief: returns a list of keys for the nodes subtree
+     * @brief: returns a list of addresses for the nodes subtree
      */
-    vector<string> getPathToNode(Node* node) {
-        vector<string> path;
+    vector<L3Address> getPathToNode(LKHNode* node) {
+        vector<L3Address> path;
         while (node != nullptr) {
-            path.push_back(node->key);
+            path.push_back(node->localAddr);
             node = node->parent;
         }
         reverse(path.begin(), path.end());

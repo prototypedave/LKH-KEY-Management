@@ -13,35 +13,27 @@
 // along with this program.  If not, see http://www.gnu.org/licenses/.
 // 
 
-#ifndef __INET_LKHMANAGER_H_
-#define __INET_LKHMANAGER_H_
+#ifndef __INET_NODE_H_
+#define __INET_NODE_H_
 
 #include <vector>
-#include "LKH.h"
-
-#include <openssl/conf.h>
-#include <openssl/evp.h>
-#include <openssl/err.h>
-#include <openssl/sha.h>
-#include <openssl/rand.h>
-#include <sstream>
-#include <cstring>
-#include <iostream>
-#include <iomanip>
 
 #include "inet/applications/base/ApplicationBase.h"
 #include "inet/common/clock/ClockUserModuleMixin.h"
 #include "inet/transportlayer/contract/udp/UdpSocket.h"
+
+#include <chrono>
+#include <fstream>
 
 namespace inet {
 
 /**
  * UDP application. See NED for more info.
  */
-class INET_API LKHManager : public LKHNode
+class INET_API LKHNode : public ClockUserModuleMixin<ApplicationBase>, public UdpSocket::ICallback
 {
   protected:
-    enum SelfMsgKinds { START = 1, SEND, STOP };
+    enum SelfMsgKinds { START = 1, SEND, STOP, LEAVE };
 
     // parameters
     std::vector<L3Address> destAddresses;
@@ -60,9 +52,6 @@ class INET_API LKHManager : public LKHNode
     int numSent = 0;
     int numReceived = 0;
 
-    int nodeLimit = 0;
-    int activeNodes = 0;
-
   protected:
     virtual int numInitStages() const override { return NUM_INIT_STAGES; }
     virtual void initialize(int stage) override;
@@ -71,11 +60,14 @@ class INET_API LKHManager : public LKHNode
     virtual void refreshDisplay() const override;
 
     // chooses random destination address
-    virtual void setSocketOptions() override;
+    virtual L3Address chooseDestAddr();
+    virtual void sendPacket();
+    virtual void processPacket(Packet *msg);
+    virtual void setSocketOptions();
 
-    virtual void processStart() override;
-    virtual void processSend() override;
-    virtual void processStop() override;
+    virtual void processStart();
+    virtual void processSend();
+    virtual void processStop();
 
     virtual void handleStartOperation(LifecycleOperation *operation) override;
     virtual void handleStopOperation(LifecycleOperation *operation) override;
@@ -85,19 +77,27 @@ class INET_API LKHManager : public LKHNode
     virtual void socketErrorArrived(UdpSocket *socket, Indication *indication) override;
     virtual void socketClosed(UdpSocket *socket) override;
 
-    void handleJoinRequest(Packet *packet);
-    void handleLeaveRequest(Packet *packet);
-
-  private:
+    void JoinRequest();
+    void handleKeyUpdate(Packet *pkt);
+    void leaveRequest();
 
   public:
-    LKHNode *server = nullptr;
-    Tree *LKHTree = nullptr;
-    std::string rootKey;
-    LKHManager() {}
-    ~LKHManager();
+    // LKH
+    const char *key;
+    LKHNode* left;
+    LKHNode* right;
+    LKHNode* parent;
+    L3Address localAddr;
+
+    // keys
+    std::string KEK;
+    std::string sessionKey;
+
+    LKHNode() : left(nullptr), right(nullptr), parent(nullptr) {}
+    ~LKHNode();
 };
 
 } // namespace inet
+
 
 #endif

@@ -17,17 +17,16 @@ package inet.applications.lkh;
 
 import inet.applications.contract.IApp;
 
-simple LKHManager like IApp
+simple LKHNode like IApp
 {
     parameters:
-        string interfaceTableModule;   // The path to the InterfaceTable module
+        string interfaceTableModule;   
         string clockModule = default(""); // relative path of a module that implements IClock; optional
         int localPort = default(-1);  // local port (-1: use ephemeral port)
         string destAddresses = default(""); // list of IP addresses, separated by spaces ("": don't send)
         string localAddress = default("");
         string packetName = default("UdpBasicAppData");
         int destPort;
-        int maxNodes;
         volatile int messageLength @unit(B); // length of messages to generate, in bytes
         double startTime @unit(s) = default(this.sendInterval); // application start time (start of the first packet)
         double stopTime @unit(s) = default(-1s);  // time of finishing sending, -1s means forever

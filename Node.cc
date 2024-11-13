@@ -13,8 +13,9 @@
 // along with this program.  If not, see http://www.gnu.org/licenses/.
 // 
 
-#include "LKHManager.h"
+#include "Node.h"
 #include "lkh_m.h"
+#include <utility>
 
 #include "inet/applications/base/ApplicationPacket_m.h"
 #include "inet/common/ModuleAccess.h"
@@ -25,19 +26,17 @@
 #include "inet/networklayer/common/FragmentationTag_m.h"
 #include "inet/networklayer/common/L3AddressResolver.h"
 #include "inet/transportlayer/contract/udp/UdpControlInfo_m.h"
-#include "inet/networklayer/common/L3AddressTag_m.h"
-#include "inet/mobility/base/MobilityBase.h"
 
 namespace inet {
 
-Define_Module(LKHManager);
+Define_Module(LKHNode);
 
-LKHManager::~LKHManager()
+LKHNode::~LKHNode()
 {
     cancelAndDelete(selfMsg);
 }
 
-void LKHManager::initialize(int stage)
+void LKHNode::initialize(int stage)
 {
     ClockUserModuleMixin::initialize(stage);
 
@@ -53,27 +52,22 @@ void LKHManager::initialize(int stage)
         stopTime = par("stopTime");
         packetName = par("packetName");
         dontFragment = par("dontFragment");
-        nodeLimit = par("maxNodes");
         if (stopTime >= CLOCKTIME_ZERO && stopTime < startTime)
             throw cRuntimeError("Invalid startTime/stopTime parameters");
         selfMsg = new ClockEvent("sendTimer");
 
         key = getParentModule()->getFullName();
-        server = this;
-
-        // initialize tree
-        LKHTree = new Tree(server);
     }
 }
 
-void LKHManager::finish()
+void LKHNode::finish()
 {
     recordScalar("packets sent", numSent);
     recordScalar("packets received", numReceived);
     ApplicationBase::finish();
 }
 
-void LKHManager::setSocketOptions()
+void LKHNode::setSocketOptions()
 {
     int timeToLive = par("timeToLive");
     if (timeToLive != -1)
@@ -108,89 +102,97 @@ void LKHManager::setSocketOptions()
     socket.setCallback(this);
 }
 
-void LKHManager::handleJoinRequest(Packet *pkt)
+L3Address LKHNode::chooseDestAddr()
 {
-    auto payload = pkt->removeAtFront<JoinRequestPacket>();
+    int k = intrand(destAddresses.size());
+    if (destAddresses[k].isUnspecified() || destAddresses[k].isLinkLocal()) {
+        L3AddressResolver().tryResolve(destAddressStr[k].c_str(), destAddresses[k]);
+    }
+    EV << k << endl;
+    EV << "Destination Addresses: ";
+    for (const std::string &address : destAddressStr) {
+        EV << address << " ";
+    }
+    EV << endl;
+    return destAddresses[k];
+}
+
+void LKHNode::JoinRequest()
+{
+    Packet *packet = new Packet();
+    if (dontFragment)
+        packet->addTag<FragmentationReq>()->setDontFragment(true);
+    const auto& payload = makeShared<JoinRequestPacket>();
+    payload->setChunkLength(B(par("messageLength")));
+    payload->setNode(getFullPath().c_str());
+    payload->addTag<CreationTimeTag>()->setCreationTime(simTime());
+    packet->insertAtBack(payload);
+    packet->setName("JoinRequest");
+    L3Address destAddr = chooseDestAddr();
+    emit(packetSentSignal, packet);
+    socket.sendTo(packet, destAddr, destPort);
+    numSent++;
+}
+
+void LKHNode::handleKeyUpdate(Packet *pkt)
+{
+    auto end = std::chrono::high_resolution_clock::now();
+    double endTime = std::chrono::duration<double>(end.time_since_epoch()).count();
+    EV << endTime << endl;
+    auto payload = pkt->removeAtFront<SessionKeyPacket>();
     if (payload != nullptr) {
-        const char * path = payload->getNode();
-        cModule* appModule = getModuleByPath(path);
-        if (appModule != nullptr) {
-            LKHNode* node = dynamic_cast<LKHNode*>(appModule);
-            if (node != nullptr) {
-                LKHNode *parent = LKHTree->getBranch();
-                activeNodes++;
-                if (activeNodes > nodeLimit) {
-                    EV_INFO << "Maximum number of nodes reached" << endl;
-                    delete pkt;
-                    return;
-                }
-                auto start = std::chrono::high_resolution_clock::now();
-                double startT = std::chrono::duration<double>(start.time_since_epoch()).count();
-                std::vector<PathData> kek = LKHTree->AddNode(parent, node, activeNodes);
-                for (const auto& data : kek) {
-                    if (data.localAddr != localAddr) {
-                        Packet *packet = new Packet();
-                        if (dontFragment)
-                            packet->addTag<FragmentationReq>()->setDontFragment(true);
-                        const auto& msg = makeShared<SessionKeyPacket>();
-                        msg->setChunkLength(B(par("messageLength")));
-                        msg->setKey(data.sessionKey.c_str());
-                        msg->setStart(startT);
-                        msg->addTag<CreationTimeTag>()->setCreationTime(simTime());
-                        packet->insertAtBack(msg);
-                        packet->setName("KeyUpdate");
-                        emit(packetSentSignal, packet);
-                        socket.sendTo(packet, data.localAddr, destPort);
-                        numSent++;
-                    }
-                }
-            }
+        const char * nKey = payload->getKey();
+        double start = payload->getStart();
+        double elapsedTime = endTime - start;
+
+        std::ofstream file;
+        file.open("results/communication.csv", std::ios::app);
+        if (file.is_open()) {
+            file << elapsedTime << "\n";
+            file.close();
         }
 
+        if (sessionKey != nKey) {
+            EV_ERROR << "Invalid key update" << endl;
+        }
+
+        clocktime_t now = clocktime_t(simTime().dbl());
+
+        // Generate a random clocktime_t between startTime and stopTime
+        clocktime_t randomTime = clocktime_t(uniform(now.dbl(), stopTime.dbl()));
+
+        if (selfMsg->isScheduled()) {
+            delete pkt;
+            return;
+        }
+        selfMsg->setKind(LEAVE);
+        scheduleClockEventAt(randomTime, selfMsg);
     }
-    LKHTree->displayTree(server);
     delete pkt;
 }
 
-void LKHManager::handleLeaveRequest(Packet *pkt)
-{
-    auto payload = pkt->removeAtFront<LeaveRequestPacket>();
-    if (payload != nullptr) {
-        const char * path = payload->getNode();
-        cModule* appModule = getModuleByPath(path);
-        if (appModule != nullptr) {
-            LKHNode* node = dynamic_cast<LKHNode*>(appModule);
-            if (node != nullptr) {
-                auto start = std::chrono::high_resolution_clock::now();
-                double startT = std::chrono::duration<double>(start.time_since_epoch()).count();
-                std::vector<PathData> kek = LKHTree->RemoveNode(node);
-                activeNodes--;
-                for (const auto& data : kek) {
-                    if (data.localAddr != localAddr) {
-                        EV<<startT << endl;
-                        Packet *packet = new Packet();
-                        if (dontFragment)
-                            packet->addTag<FragmentationReq>()->setDontFragment(true);
-                        const auto& msg = makeShared<SessionKeyPacket>();
-                        msg->setChunkLength(B(par("messageLength")));
-                        msg->setKey(data.sessionKey.c_str());
-                        msg->setStart(startT);
-                        msg->addTag<CreationTimeTag>()->setCreationTime(simTime());
-                        packet->insertAtBack(msg);
-                        packet->setName("KeyUpdate");
-                        emit(packetSentSignal, packet);
-                        socket.sendTo(packet, data.localAddr, destPort);
-                        numSent++;
-                    }
-                }
-            }
-        }
-    }
-    LKHTree->displayTree(server);
-    delete pkt;
+void LKHNode::leaveRequest() {
+    Packet *packet = new Packet();
+    if (dontFragment)
+        packet->addTag<FragmentationReq>()->setDontFragment(true);
+    const auto& payload = makeShared<LeaveRequestPacket>();
+    payload->setChunkLength(B(par("messageLength")));
+    payload->setNode(getFullPath().c_str());
+    payload->addTag<CreationTimeTag>()->setCreationTime(simTime());
+    packet->insertAtBack(payload);
+    packet->setName("LeaveRequest");
+    L3Address destAddr = chooseDestAddr();
+    emit(packetSentSignal, packet);
+    socket.sendTo(packet, destAddr, destPort);
+    numSent++;
 }
 
-void LKHManager::processStart()
+void LKHNode::sendPacket()
+{
+    JoinRequest();
+}
+
+void LKHNode::processStart()
 {
     socket.setOutputGate(gate("socketOut"));
     const char *localAddress = par("localAddress");
@@ -210,33 +212,25 @@ void LKHManager::processStart()
         destAddresses.push_back(result);
     }
 
-    if (stopTime >= CLOCKTIME_ZERO) {
-        selfMsg->setKind(STOP);
-        scheduleClockEventAt(stopTime, selfMsg);
+    if (!destAddresses.empty()) {
+        selfMsg->setKind(SEND);
+        processSend();
     }
     localAddr = L3AddressResolver().resolve(key);
+
 }
 
-void LKHManager::processSend()
+void LKHNode::processSend()
 {
     sendPacket();
-    clocktime_t d = par("sendInterval");
-    if (stopTime < CLOCKTIME_ZERO || getClockTime() + d < stopTime) {
-        selfMsg->setKind(SEND);
-        scheduleClockEventAfter(d, selfMsg);
-    }
-    else {
-        selfMsg->setKind(STOP);
-        scheduleClockEventAt(stopTime, selfMsg);
-    }
 }
 
-void LKHManager::processStop()
+void LKHNode::processStop()
 {
     socket.close();
 }
 
-void LKHManager::handleMessageWhenUp(cMessage *msg)
+void LKHNode::handleMessageWhenUp(cMessage *msg)
 {
     if (msg->isSelfMessage()) {
         ASSERT(msg == selfMsg);
@@ -253,6 +247,10 @@ void LKHManager::handleMessageWhenUp(cMessage *msg)
                 processStop();
                 break;
 
+            case LEAVE:
+                leaveRequest();
+                break;
+
             default:
                 throw cRuntimeError("Invalid kind %d in self message", (int)selfMsg->getKind());
         }
@@ -261,30 +259,27 @@ void LKHManager::handleMessageWhenUp(cMessage *msg)
         socket.processMessage(msg);
 }
 
-void LKHManager::socketDataArrived(UdpSocket *socket, Packet *packet)
+void LKHNode::socketDataArrived(UdpSocket *socket, Packet *packet)
 {
     std::string pkname = packet->getName();
-    if (pkname == "JoinRequest") {
-        handleJoinRequest(packet);
-    } else if (pkname == "LeaveRequest") {
-        handleLeaveRequest(packet);
+    if (pkname == "KeyUpdate") {
+        handleKeyUpdate(packet);
     }
-    //processPacket(packet);
 }
 
-void LKHManager::socketErrorArrived(UdpSocket *socket, Indication *indication)
+void LKHNode::socketErrorArrived(UdpSocket *socket, Indication *indication)
 {
     EV_WARN << "Ignoring UDP error report " << indication->getName() << endl;
     delete indication;
 }
 
-void LKHManager::socketClosed(UdpSocket *socket)
+void LKHNode::socketClosed(UdpSocket *socket)
 {
     if (operationalState == State::STOPPING_OPERATION)
         startActiveOperationExtraTimeOrFinish(par("stopOperationExtraTime"));
 }
 
-void LKHManager::refreshDisplay() const
+void LKHNode::refreshDisplay() const
 {
     ApplicationBase::refreshDisplay();
 
@@ -293,22 +288,31 @@ void LKHManager::refreshDisplay() const
     getDisplayString().setTagArg("t", 0, buf);
 }
 
-void LKHManager::handleStartOperation(LifecycleOperation *operation)
+void LKHNode::processPacket(Packet *pk)
+{
+    emit(packetReceivedSignal, pk);
+    EV_INFO << "Received packet: " << UdpSocket::getReceivedPacketInfo(pk) << endl;
+    delete pk;
+    numReceived++;
+}
+
+void LKHNode::handleStartOperation(LifecycleOperation *operation)
 {
     clocktime_t start = std::max(startTime, getClockTime());
     if ((stopTime < CLOCKTIME_ZERO) || (start < stopTime) || (start == stopTime && startTime == stopTime)) {
-        processStart();
+        selfMsg->setKind(START);
+        scheduleClockEventAt(start, selfMsg);
     }
 }
 
-void LKHManager::handleStopOperation(LifecycleOperation *operation)
+void LKHNode::handleStopOperation(LifecycleOperation *operation)
 {
     cancelEvent(selfMsg);
     socket.close();
     delayActiveOperationFinish(par("stopOperationTimeout"));
 }
 
-void LKHManager::handleCrashOperation(LifecycleOperation *operation)
+void LKHNode::handleCrashOperation(LifecycleOperation *operation)
 {
     cancelClockEvent(selfMsg);
     socket.destroy(); // TODO  in real operating systems, program crash detected by OS and OS closes sockets of crashed programs.
