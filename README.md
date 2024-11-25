@@ -77,7 +77,7 @@ The Logical Key Hierarchy (LKH) system organizes keys in a hierarchical tree str
 **Project:** lkh
 
 ### Network
-(lkh)[docs/images/lkh.png]
+![lkh](docs/images/lkh.png)
 
 ## DTLS
 The Datagram Transport Layer Security (DTLS) implementation ensures secure communication over UDP.
@@ -90,7 +90,7 @@ The Datagram Transport Layer Security (DTLS) implementation ensures secure commu
 **Project:** dtls
 
 ### Network
-(lkh)[docs/images/dtls.png]
+![dtls](docs/images/dtls.png)
 
 ## Flat Key Network System
 The Flat Key Network System provides a straightforward mechanism for key distribution in flat, non-hierarchical networks.
@@ -103,10 +103,10 @@ The Flat Key Network System provides a straightforward mechanism for key distrib
 **Project:** flat
 
 ### Network
-(lkh)[docs/images/flat.png]
+![flat](docs/images/flat.png)
 
 ## Usage
-You can integrate these sub-projects into your larger system or run them independently. Use the provided test scripts for functional verification. Contact me on (Email)[popupgfj@gmail.com]
+You can integrate these sub-projects into your larger system or run them independently. Use the provided test scripts for functional verification. Contact me on popupgfj@gmail.com
 
 ## Contributing
 Contributions are welcomed!
